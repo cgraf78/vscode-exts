@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install declared VS Code marketplace extensions for dotfiles."""
+"""Reconcile declared VS Code marketplace extensions additively."""
 
 from __future__ import annotations
 
@@ -106,18 +106,58 @@ def warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
 
+def _xdg_config_home(env: Mapping[str, str] = os.environ) -> Path | None:
+    """Resolve the absolute XDG configuration root without using the cwd."""
+
+    config_home = Path(env.get("XDG_CONFIG_HOME", ""))
+    if config_home.is_absolute():
+        return config_home
+    home = Path(env.get("HOME", ""))
+    if home.is_absolute():
+        return home / ".config"
+    return None
+
+
+def default_manifests(env: Mapping[str, str] = os.environ) -> list[Path]:
+    """Return the standard XDG manifest stream in deterministic order."""
+
+    config_home = _xdg_config_home(env)
+    if config_home is None:
+        raise ManifestError(
+            "cannot resolve the vscode-exts config directory: set an absolute "
+            "XDG_CONFIG_HOME or HOME, or pass --manifest"
+        )
+
+    config_dir = config_home / "vscode-exts"
+    paths: list[Path] = []
+    base = config_dir / "extensions.toml"
+    if base.is_file():
+        paths.append(base)
+
+    fragments_dir = config_dir / "extensions.d"
+    if fragments_dir.is_dir():
+        paths.extend(sorted(path for path in fragments_dir.glob("*.toml") if path.is_file()))
+
+    if not paths:
+        raise ManifestError(
+            f"no manifest files found in {config_dir}; create extensions.toml or "
+            "extensions.d/*.toml, or pass --manifest"
+        )
+    return paths
+
+
 def load_manifests(paths: Sequence[Path]) -> list[Profile]:
     """Load extension profiles from one or more overlay-friendly TOML manifests."""
 
     bundles: dict[str, list[ExtensionSpec]] = {}
     profiles: dict[str, ProfileFragment] = {}
 
-    # Dot overlays should be able to add a small amount of editor policy without
-    # repeating the base file. Treat every TOML file as a fragment: bundles with
-    # the same name append extensions, and profile fragments append `include`
-    # entries. Target identity fields (`editor`, `channel`, `scope`) are allowed
-    # to appear only once for a profile so two overlays cannot silently point the
-    # same profile name at different extension hosts.
+    # Independent files should be able to add a small amount of editor policy
+    # without repeating the base file. Treat every TOML file as a fragment:
+    # bundles with the same name append extensions, and profile fragments append
+    # `include` entries. Target identity fields (`editor`, `channel`, `scope`) are
+    # allowed to appear only once for a profile so two fragments cannot silently
+    # point the same profile name at different extension hosts.
     for path in paths:
         manifest = _load_toml(path)
         _merge_manifest(path, manifest, bundles, profiles)
@@ -430,7 +470,7 @@ def _write_windows_cli_wrapper(
     # wrapper is meant to avoid. Rewriting the file on each run is cheap and
     # keeps it aligned with VS Code updates that move cli.js between layouts.
     wrapper_dir = windows_home / (".vscode" if profile.channel == "stable" else ".vscode-insiders")
-    wrapper = wrapper_dir / "dot-code-cli.cmd"
+    wrapper = wrapper_dir / "vscode-exts-code-cli.cmd"
     # Set ELECTRON_RUN_AS_NODE in the batch file instead of relying on WSLENV.
     # WSLENV forwarding is useful for simple .exe launches, but here cmd.exe is
     # the process boundary we control; declaring the variable in Windows command
@@ -451,15 +491,11 @@ def _write_windows_cli_wrapper(
 
 
 def _wsl_windows_home() -> Path | None:
-    override = (
-        os.environ.get("DOT_TEST_WINDOWS_HOME")
-        or os.environ.get("DOT_WINDOWS_HOME")
-        or os.environ.get("DOT_VSCODE_WINDOWS_HOME")
-    )
+    override = os.environ.get("VSCODE_EXTS_WINDOWS_HOME")
     if override:
         return Path(override)
 
-    if os.environ.get("DOT_TEST") == "1":
+    if os.environ.get("VSCODE_EXTS_TEST_MODE") == "1":
         return None
 
     userprofile = _windows_env_path("USERPROFILE")
@@ -473,13 +509,13 @@ def _wsl_windows_home() -> Path | None:
     # Do not infer the Windows username by scanning /mnt/c/Users. On shared or
     # reused Windows machines, "the only profile with VS Code installed" can
     # still be the wrong account. If Windows cannot tell us the current profile,
-    # skip the native target unless the caller sets DOT_VSCODE_WINDOWS_HOME
+    # skip the native target unless the caller sets VSCODE_EXTS_WINDOWS_HOME
     # explicitly.
     return None
 
 
 def _windows_cmd_exe() -> Path | None:
-    override = os.environ.get("DOT_TEST_WINDOWS_CMD_EXE")
+    override = os.environ.get("VSCODE_EXTS_TEST_WINDOWS_CMD_EXE")
     if override:
         return Path(override)
 
@@ -899,7 +935,7 @@ def _extension_lock_path(extensions_dir: Path, env: Mapping[str, str] = os.envir
     if cache_home is None:
         return None
     key = hashlib.sha256(str(extensions_dir).encode("utf-8")).hexdigest()[:24]
-    return cache_home / "dot" / "vscode-extensions" / f"{key}.lock"
+    return cache_home / "vscode-exts" / "locks" / f"{key}.lock"
 
 
 def _run_code(target: Target, args: list[str]) -> subprocess.CompletedProcess[str] | None:
@@ -938,7 +974,7 @@ def _command_display(command: Sequence[str]) -> str:
 
 
 def _cli_timeout_seconds() -> float:
-    raw = os.environ.get("DOT_VSCODE_EXTENSIONS_TIMEOUT_SECONDS")
+    raw = os.environ.get("VSCODE_EXTS_TIMEOUT_SECONDS")
     if raw is None:
         return DEFAULT_CLI_TIMEOUT_SECONDS
     try:
@@ -970,10 +1006,26 @@ def run(manifests: Sequence[Path], home: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        help=(
+            "manifest to load (repeatable); when omitted, load "
+            "XDG_CONFIG_HOME/vscode-exts/extensions.toml and extensions.d/*.toml"
+        ),
+    )
     parser.add_argument("--home", type=Path, default=Path.home())
     args = parser.parse_args()
-    return run(args.manifest, args.home)
+    if args.manifest:
+        manifests = args.manifest
+    else:
+        try:
+            manifests = default_manifests()
+        except ManifestError as exc:
+            warn(str(exc))
+            return 2
+    return run(manifests, args.home)
 
 
 if __name__ == "__main__":

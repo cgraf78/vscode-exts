@@ -7,10 +7,48 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "$TEST_DIR/.." && pwd)
 status=0
 
-bash "$TEST_DIR/vscode-exts-test" || status=$?
-python3 -m py_compile \
+for suite in vscode-exts-test install-test; do
+  bash "$TEST_DIR/$suite" || status=$?
+done
+python3 - \
   "$ROOT/bin/vscode-exts" \
   "$ROOT/lib/vscode_exts/__init__.py" \
-  "$ROOT/lib/vscode_exts/reconciler.py" || status=$?
+  "$ROOT/lib/vscode_exts/reconciler.py" <<'PY' || status=$?
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:]:
+    path = Path(value)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PY
+
+python3 - "$ROOT/share/vscode-exts/schemas/extensions.schema.json" <<'PY' || status=$?
+import json
+import sys
+from pathlib import Path
+
+schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+assert schema["$id"].startswith("https://raw.githubusercontent.com/cgraf78/vscode-exts/")
+PY
+
+if [[ "${VSCODE_EXTS_SKIP_SHELLCHECK:-0}" != 1 ]] &&
+  command -v shellcheck >/dev/null 2>&1; then
+  shell_files=()
+  while IFS=$'\t' read -r record_type path || [[ -n "$record_type$path" ]]; do
+    [[ "$record_type" == program ]] || continue
+    shell_files+=("$ROOT/$path")
+  done <"$ROOT/.github/shellcheck-files.txt"
+
+  if ((${#shell_files[@]} == 0)); then
+    printf 'test/run: ShellCheck inventory has no programs\n' >&2
+    status=1
+  else
+    (
+      cd "$ROOT"
+      shellcheck -x -P SCRIPTDIR "${shell_files[@]}"
+    ) || status=$?
+  fi
+fi
 
 exit "$status"

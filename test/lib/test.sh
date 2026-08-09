@@ -4,7 +4,7 @@
 
 PASS=0
 FAIL=0
-export DOT_TEST=1
+export VSCODE_EXTS_TEST_MODE=1
 export PYTHONDONTWRITEBYTECODE=1
 
 _pass() {
