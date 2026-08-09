@@ -1,0 +1,21 @@
+# A bundle is reusable policy. Extension IDs are case-insensitive during
+# reconciliation, while the original spelling is preserved for the VS Code CLI.
+[bundle.common]
+extensions = ["ms-python.python", "redhat.vscode-yaml", "rust-lang.rust-analyzer"]
+
+[bundle.desktop]
+extensions = ["ms-vscode-remote.remote-ssh"]
+
+# Profiles identify extension hosts. A local profile uses the desktop CLI; a
+# remote profile uses a standalone VS Code Server installation under HOME.
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common", "desktop"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]

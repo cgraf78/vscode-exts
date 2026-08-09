@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# install-test — checkout-backed installation and overwrite safety.
+
+set -u
+
+TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$TEST_DIR/.." && pwd)
+
+# shellcheck source=test/lib/test.sh
+. "$TEST_DIR/lib/test.sh"
+
+prefix=$(_tmpdir)
+unset install_rc
+PREFIX="$prefix" "$ROOT/install.sh" >"$prefix/install.out" 2>"$prefix/install.err" ||
+  install_rc=$?
+_assert_exit "installation: succeeds" 0 "${install_rc:-0}"
+
+installed="$prefix/bin/vscode-exts"
+if [[ -L "$installed" ]]; then
+  _pass "installation: publishes a symlink"
+else
+  _fail "installation: publishes a symlink"
+fi
+if [[ -x "$installed" ]] && "$installed" --help >/dev/null 2>&1; then
+  _pass "installation: symlink resolves the provider library"
+else
+  _fail "installation: symlink resolves the provider library"
+fi
+
+blocked_prefix=$(_tmpdir)
+mkdir -p "$blocked_prefix/bin"
+printf 'user owned\n' >"$blocked_prefix/bin/vscode-exts"
+unset blocked_rc
+PREFIX="$blocked_prefix" "$ROOT/install.sh" \
+  >"$blocked_prefix/install.out" 2>"$blocked_prefix/install.err" || blocked_rc=$?
+_assert_exit "installation: rejects a non-symlink destination" 1 "${blocked_rc:-0}"
+_assert_eq "installation: preserves a non-symlink destination" \
+  "user owned" "$(cat "$blocked_prefix/bin/vscode-exts")"
+_assert_contains "installation: refusal names the destination" \
+  "$blocked_prefix/bin/vscode-exts" "$(cat "$blocked_prefix/install.err")"
+
+_test_summary

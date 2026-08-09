@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/cgraf78/vscode-exts/main/share/vscode-exts/schemas/extensions.schema.json",
+  "title": "vscode-exts manifest fragment",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "bundle": {
+      "type": "object",
+      "description": "Reusable extension sets. Multiple manifest fragments may define the same bundle name; vscode-exts appends their extension lists.",
+      "additionalProperties": {
+        "$ref": "#/$defs/bundle"
+      }
+    },
+    "profile": {
+      "type": "object",
+      "description": "Install target fragments. Multiple manifest fragments may define the same profile name; vscode-exts merges target fields and appends include lists.",
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "extensions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extensionSpec"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "editor": {
+          "type": "string",
+          "enum": ["vscode"]
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["stable", "insiders"]
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["local", "remote"]
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "extensionSpec": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*\\.[A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$"
+    }
+  }
+}
