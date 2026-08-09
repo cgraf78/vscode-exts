@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run the public behavior contract from a checkout without requiring install.
+
+set -u
+
+TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$TEST_DIR/.." && pwd)
+status=0
+
+bash "$TEST_DIR/vscode-exts-test" || status=$?
+python3 -m py_compile \
+  "$ROOT/bin/vscode-exts" \
+  "$ROOT/lib/vscode_exts/__init__.py" \
+  "$ROOT/lib/vscode_exts/reconciler.py" || status=$?
+
+exit "$status"

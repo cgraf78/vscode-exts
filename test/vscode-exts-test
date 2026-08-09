@@ -1,0 +1,910 @@
+#!/usr/bin/env bash
+# vscode-extensions-test — VS Code extension manifest and resolver behavior.
+
+set -euo pipefail
+export NO_COLOR=1
+
+TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$TEST_DIR/.." && pwd)
+
+# shellcheck source=test/lib/test.sh
+. "$TEST_DIR/lib/test.sh"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP: vscode-extensions-test (python3 unavailable)"
+  exit 0
+fi
+
+helper="$ROOT/bin/vscode-exts"
+module="$ROOT/lib/vscode_exts/reconciler.py"
+if [[ ! -f "$helper" ]]; then
+  _fail "vscode extensions: helper exists"
+  _test_summary
+fi
+
+_make_fake_code() {
+  local path="$1" fail_list="${2:-0}" sleep_seconds="${3:-0}"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+log = Path(os.environ["DOT_TEST_VSCODE_EXT_LOG"])
+fail_list = "__FAIL_LIST__" == "1"
+sleep_seconds = float("__SLEEP_SECONDS__")
+
+def value_after(flag):
+    try:
+        return args[args.index(flag) + 1]
+    except (ValueError, IndexError):
+        return ""
+
+extensions_dir = Path(value_after("--extensions-dir"))
+state_path = extensions_dir / "installed.json"
+extensions_dir.mkdir(parents=True, exist_ok=True)
+if state_path.exists():
+    installed = json.loads(state_path.read_text(encoding="utf-8"))
+else:
+    installed = {}
+
+with log.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "command": sys.argv[0],
+        "argv": args,
+        "electron_run_as_node": os.environ.get("ELECTRON_RUN_AS_NODE"),
+    }) + "\n")
+
+if sleep_seconds > 0:
+    time.sleep(sleep_seconds)
+
+if "--list-extensions" in args:
+    if fail_list:
+        print("list failed", file=sys.stderr)
+        sys.exit(3)
+    for extension_id, version in sorted(installed.items()):
+        if version:
+            print(f"{extension_id}@{version}")
+        else:
+            print(extension_id)
+    sys.exit(0)
+
+if "--install-extension" in args:
+    spec = value_after("--install-extension")
+    if "@" in spec:
+        extension_id, version = spec.rsplit("@", 1)
+    else:
+        extension_id, version = spec, None
+    installed[extension_id.lower()] = version
+    state_path.write_text(json.dumps(installed, sort_keys=True), encoding="utf-8")
+    sys.exit(0)
+
+sys.exit(0)
+PY
+  perl -0pi -e "s/__FAIL_LIST__/$fail_list/g" "$path"
+  perl -0pi -e "s/__SLEEP_SECONDS__/$sleep_seconds/g" "$path"
+  chmod +x "$path"
+}
+
+_make_broken_code() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<'EOF'
+#!/definitely/missing-python
+EOF
+  chmod +x "$path"
+}
+
+_make_fake_cmd() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<'PY'
+#!/usr/bin/env python3
+import os
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+try:
+    command_index = args.index("/C")
+    command = args[command_index + 1]
+except (ValueError, IndexError):
+    sys.exit(2)
+
+log = os.environ.get("DOT_TEST_WINDOWS_CMD_LOG")
+if log:
+    with Path(log).open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({
+                "argv": args,
+                "cwd": os.getcwd(),
+            })
+            + "\n"
+        )
+
+if "/D" not in args[:command_index]:
+    print("missing /D", file=sys.stderr)
+    sys.exit(3)
+
+if command == "exit 0":
+    sys.exit(0)
+
+if command.startswith("set "):
+    name = command.split(maxsplit=1)[1]
+    value = os.environ.get(f"DOT_TEST_FAKE_{name}")
+    if value:
+        print(f"{name}={value}")
+        sys.exit(0)
+    sys.exit(1)
+
+def to_posix(value):
+    windows_home = os.environ.get("DOT_TEST_FAKE_USERPROFILE", "")
+    posix_home = os.environ.get("DOT_TEST_FAKE_USERPROFILE_POSIX", "")
+    if windows_home and posix_home and value.lower().startswith(windows_home.lower()):
+        suffix = value[len(windows_home):].replace("\\", "/").lstrip("/")
+        return str(Path(posix_home) / suffix) if suffix else posix_home
+    return value
+
+wrapper = Path(to_posix(command))
+rest = [to_posix(arg) for arg in args[command_index + 2:]]
+lines = [
+    line.strip()
+    for line in wrapper.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+launch = next(
+    line
+    for line in lines
+    if not line.lower().startswith("@echo")
+    and not line.lower().startswith("set ")
+)
+quoted = re.findall(r'"([^"]+)"', launch.replace("%*", ""))
+base = [to_posix(item) for item in quoted] or shlex.split(launch.replace("%*", ""))
+env = os.environ.copy()
+env["ELECTRON_RUN_AS_NODE"] = "1"
+result = subprocess.run([*base, *rest], env=env, check=False)
+sys.exit(result.returncode)
+PY
+  chmod +x "$path"
+}
+
+_write_product() {
+  local path="$1" version="$2"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<JSON
+{"version":"$version","nameLong":"Visual Studio Code","applicationName":"code"}
+JSON
+}
+
+work=$(_tmpdir)
+home="$work/home"
+bin="$work/bin"
+mkdir -p "$home" "$bin"
+export XDG_CACHE_HOME="$work/cache"
+
+python3 - "$module" "$work" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+helper = Path(sys.argv[1])
+work = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("dot_vscode_extensions", helper)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+home = work / "lock-home"
+target = work / "extensions"
+absolute_cache = work / "absolute-cache"
+assert module._xdg_cache_home(
+    {"HOME": str(home), "XDG_CACHE_HOME": str(absolute_cache)}
+) == absolute_cache
+assert module._xdg_cache_home({"HOME": str(home), "XDG_CACHE_HOME": ""}) == home / ".cache"
+assert module._xdg_cache_home(
+    {"HOME": str(home), "XDG_CACHE_HOME": "relative/cache"}
+) == home / ".cache"
+assert module._xdg_cache_home({"XDG_CACHE_HOME": str(absolute_cache)}) == absolute_cache
+assert module._xdg_cache_home({"XDG_CACHE_HOME": "relative/cache"}) is None
+
+newline_cache = Path(f"{absolute_cache}\n")
+assert os.fsencode(module._xdg_cache_home({"XDG_CACHE_HOME": str(newline_cache)})) == os.fsencode(
+    newline_cache
+)
+
+cwd_one = work / "lock-cwd-one"
+cwd_two = work / "lock-cwd-two"
+cwd_one.mkdir()
+cwd_two.mkdir()
+env = {"HOME": str(home), "XDG_CACHE_HOME": "relative/cache"}
+os.chdir(cwd_one)
+lock_one = module._extension_lock_path(target, env)
+os.chdir(cwd_two)
+lock_two = module._extension_lock_path(target, env)
+assert lock_one == lock_two
+assert lock_one is not None and lock_one.parent == home / ".cache/dot/vscode-extensions"
+PY
+_assert_exit "vscode extensions: lock path follows absolute XDG policy" 0 "$?"
+
+manifest_base="$work/extensions.toml"
+manifest_overlay="$work/extensions-extra.toml"
+cat >"$manifest_base" <<'TOML'
+[bundle.common]
+extensions = [
+  "Example.One",
+  "example.pinned",
+]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
+TOML
+
+cat >"$manifest_overlay" <<'TOML'
+[bundle.overlay]
+extensions = [
+  "example.two",
+  "example.pinned@2.0.0",
+]
+
+[profile.vscode-remote]
+include = ["overlay"]
+TOML
+
+local_code="$bin/code"
+_make_fake_code "$local_code"
+export PATH="$bin:$PATH"
+
+remote_old="$home/.vscode-server/cli/servers/Stable-old/server"
+remote_new="$home/.vscode-server/cli/servers/Stable-new/server"
+_make_fake_code "$remote_old/bin/code-server" 1
+_make_fake_code "$remote_new/bin/code-server"
+_write_product "$remote_old/product.json" "1.3.0"
+_write_product "$remote_new/product.json" "1.2.0"
+
+local_state="$home/.vscode/extensions/installed.json"
+remote_state="$home/.vscode-server/extensions/installed.json"
+mkdir -p "$(dirname "$local_state")" "$(dirname "$remote_state")"
+cat >"$local_state" <<'JSON'
+{"example.one":"9.9.9","example.pinned":"1.0.0","unmanaged.local":"1.0.0"}
+JSON
+cat >"$remote_state" <<'JSON'
+{"example.one":"9.9.9","example.pinned":"1.0.0","unmanaged.remote":"1.0.0"}
+JSON
+
+log="$work/code.log"
+DOT_TEST_VSCODE_EXT_LOG="$log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$manifest_base" \
+  --manifest "$manifest_overlay"
+_assert_exit "vscode extensions: helper exits cleanly" 0 "$?"
+
+python3 - "$local_state" "$remote_state" "$log" "$remote_new/bin/code-server" "$remote_old/bin/code-server" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+local_state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+remote_state = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+log = [
+    json.loads(line)
+    for line in Path(sys.argv[3]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+remote_command = sys.argv[4]
+old_remote_command = sys.argv[5]
+
+assert local_state["example.one"] == "9.9.9"
+assert local_state["example.pinned"] == "1.0.0"
+assert local_state["unmanaged.local"] == "1.0.0"
+assert "example.two" not in local_state
+
+assert remote_state["example.one"] == "9.9.9"
+assert remote_state["example.pinned"] == "2.0.0"
+assert remote_state["example.two"] is None
+assert remote_state["unmanaged.remote"] == "1.0.0"
+
+remote_installs = [
+    entry
+    for entry in log
+    if entry["argv"][:2] == ["--extensions-dir", str(Path(sys.argv[2]).parent)]
+    and "--install-extension" in entry["argv"]
+]
+assert any(entry["command"] == remote_command for entry in log)
+assert any(entry["command"] == old_remote_command for entry in log)
+assert any(
+    entry["command"] == remote_command
+    and entry["argv"] == [
+        "--extensions-dir",
+        str(Path(sys.argv[2]).parent),
+        "--install-extension",
+        "example.two",
+    ]
+    for entry in remote_installs
+)
+assert any(
+    entry["command"] == remote_command
+    and entry["argv"] == [
+        "--extensions-dir",
+        str(Path(sys.argv[2]).parent),
+        "--install-extension",
+        "example.pinned@2.0.0",
+    ]
+    for entry in remote_installs
+)
+PY
+_assert_exit "vscode extensions: overlay fragments aggregate and preserve unmanaged extensions" 0 "$?"
+
+legacy_home="$work/legacy-home"
+legacy_server="$legacy_home/.vscode-server/bin/commit123"
+legacy_manifest="$work/legacy.toml"
+mkdir -p "$legacy_home"
+_make_fake_code "$legacy_server/bin/code-server"
+_write_product "$legacy_server/product.json" "1.4.0"
+cat >"$legacy_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.legacy"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
+TOML
+legacy_log="$work/legacy.log"
+DOT_TEST_VSCODE_EXT_LOG="$legacy_log" \
+  python3 "$helper" --home "$legacy_home" --manifest "$legacy_manifest"
+_assert_exit "vscode extensions: legacy server layout installs remote extensions" 0 "$?"
+python3 - "$legacy_home/.vscode-server/extensions/installed.json" \
+  "$legacy_log" "$legacy_server/bin/code-server" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+remote_state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+log = [
+    json.loads(line)
+    for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+legacy_command = sys.argv[3]
+
+assert remote_state["example.legacy"] is None
+assert any(entry["command"] == legacy_command for entry in log)
+PY
+
+missing_home="$work/no-server-home"
+mkdir -p "$missing_home"
+DOT_TEST_VSCODE_EXT_LOG="$work/missing.log" \
+  PATH="$work/no-bin" \
+  "$(command -v python3)" "$helper" --home "$missing_home" --manifest "$manifest_base"
+_assert_exit "vscode extensions: missing VS Code targets skip cleanly" 0 "$?"
+
+bad_manifest="$work/bad.toml"
+cat >"$bad_manifest" <<'TOML'
+[profile.vscode-remote]
+include = ["missing"]
+TOML
+DOT_TEST_VSCODE_EXT_LOG="$work/bad.log" \
+  python3 "$helper" --home "$home" --manifest "$bad_manifest" >/dev/null 2>&1 || bad_rc=$?
+_assert_exit "vscode extensions: incomplete aggregate fails validation" 2 "${bad_rc:-0}"
+
+pinned_conflict_manifest="$work/pinned-conflict.toml"
+cat >"$pinned_conflict_manifest" <<'TOML'
+[bundle.conflict]
+extensions = ["example.pinned@3.0.0"]
+
+[profile.vscode-remote]
+include = ["conflict"]
+TOML
+unset pinned_conflict_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/pinned-conflict.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$manifest_base" \
+  --manifest "$manifest_overlay" \
+  --manifest "$pinned_conflict_manifest" >/dev/null 2>&1 || pinned_conflict_rc=$?
+_assert_exit "vscode extensions: conflicting pinned versions fail validation" \
+  2 "${pinned_conflict_rc:-0}"
+
+conflict_manifest="$work/conflict.toml"
+cat >"$conflict_manifest" <<'TOML'
+[profile.vscode-remote]
+scope = "local"
+TOML
+unset conflict_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/conflict.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$manifest_base" \
+  --manifest "$conflict_manifest" >/dev/null 2>&1 || conflict_rc=$?
+_assert_exit "vscode extensions: conflicting profile fragments fail validation" 2 "${conflict_rc:-0}"
+
+invalid_scope_manifest="$work/invalid-scope.toml"
+cat >"$invalid_scope_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.scope"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "workspace"
+include = ["common"]
+TOML
+unset invalid_scope_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/invalid-scope.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$invalid_scope_manifest" >/dev/null 2>&1 || invalid_scope_rc=$?
+_assert_exit "vscode extensions: unsupported profile targets fail validation" \
+  2 "${invalid_scope_rc:-0}"
+
+invalid_manifest="$work/invalid-extension.toml"
+cat >"$invalid_manifest" <<'TOML'
+[bundle.bad]
+extensions = ["not-an-extension-id"]
+TOML
+unset invalid_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/invalid.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$invalid_manifest" >/dev/null 2>&1 || invalid_rc=$?
+_assert_exit "vscode extensions: invalid extension specs fail validation" 2 "${invalid_rc:-0}"
+
+unknown_bundle_key_manifest="$work/unknown-bundle-key.toml"
+cat >"$unknown_bundle_key_manifest" <<'TOML'
+[bundle.bad]
+extension = ["example.misspelled"]
+TOML
+unset unknown_bundle_key_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/unknown-bundle-key.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$unknown_bundle_key_manifest" >/dev/null 2>&1 || unknown_bundle_key_rc=$?
+_assert_exit "vscode extensions: unknown bundle keys fail validation" \
+  2 "${unknown_bundle_key_rc:-0}"
+
+unknown_profile_key_manifest="$work/unknown-profile-key.toml"
+cat >"$unknown_profile_key_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.profile"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+includes = ["common"]
+TOML
+unset unknown_profile_key_rc
+DOT_TEST_VSCODE_EXT_LOG="$work/unknown-profile-key.log" \
+  python3 "$helper" \
+  --home "$home" \
+  --manifest "$unknown_profile_key_manifest" >/dev/null 2>&1 || unknown_profile_key_rc=$?
+_assert_exit "vscode extensions: unknown profile keys fail validation" \
+  2 "${unknown_profile_key_rc:-0}"
+
+timeout_home="$work/timeout-home"
+timeout_bin="$work/timeout-bin"
+timeout_manifest="$work/timeout.toml"
+mkdir -p "$timeout_home" "$timeout_bin"
+_make_fake_code "$timeout_bin/code" 0 1
+cat >"$timeout_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.timeout"]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+TOML
+env -u WSL_DISTRO_NAME -u WSL_INTEROP \
+  DOT_TEST_VSCODE_EXT_LOG="$work/timeout.log" \
+  DOT_VSCODE_EXTENSIONS_TIMEOUT_SECONDS=0.1 \
+  PATH="$timeout_bin:$PATH" \
+  python3 "$helper" --home "$timeout_home" --manifest "$timeout_manifest" \
+  >"$work/timeout.out" 2>"$work/timeout.err"
+_assert_exit "vscode extensions: timed out CLI remains advisory" 0 "$?"
+_assert_contains "vscode extensions: timeout warning is visible" \
+  "VS Code CLI timed out" "$(cat "$work/timeout.err")"
+
+shim_home="$work/shim-home"
+shim_bin="$shim_home/.vscode-server/cli/servers/Stable-shim/server/bin/remote-cli"
+shim_server="$shim_home/.vscode-server/cli/servers/Stable-real/server"
+shim_manifest="$work/shim.toml"
+mkdir -p "$shim_bin"
+_make_fake_code "$shim_bin/code" 1
+_make_fake_code "$shim_server/bin/code-server"
+_write_product "$shim_server/product.json" "9.9.9"
+cat >"$shim_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.remote"]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
+TOML
+shim_log="$work/shim.log"
+DOT_TEST_VSCODE_EXT_LOG="$shim_log" \
+  PATH="$shim_bin:$PATH" \
+  "$(command -v python3)" "$helper" --home "$shim_home" --manifest "$shim_manifest"
+_assert_exit "vscode extensions: remote IPC shim is not treated as local code" 0 "$?"
+python3 - "$shim_log" "$shim_bin/code" "$shim_server/bin/code-server" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+log = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+shim = sys.argv[2]
+server = sys.argv[3]
+assert not any(entry["command"] == shim for entry in log)
+assert any(entry["command"] == server for entry in log)
+PY
+_assert_exit "vscode extensions: remote profile still uses code-server" 0 "$?"
+
+unusable_home="$work/unusable-home"
+unusable_bin="$work/unusable-bin"
+unusable_manifest="$work/unusable.toml"
+unusable_log="$work/unusable.log"
+mkdir -p "$unusable_home" "$unusable_bin"
+cat >"$unusable_bin/code" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DOT_TEST_UNUSABLE_CODE_LOG"
+case " $* " in
+  *" --list-extensions "*)
+    printf 'integrated terminal IPC is unavailable\n' >&2
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$unusable_bin/code"
+cat >"$unusable_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.unusable"]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+TOML
+env -u WSL_DISTRO_NAME -u WSL_INTEROP \
+  DOT_TEST_UNUSABLE_CODE_LOG="$unusable_log" \
+  PATH="$unusable_bin:/usr/bin:/bin" \
+  "$(command -v python3)" "$helper" --home "$unusable_home" --manifest "$unusable_manifest" \
+  >"$work/unusable.out" 2>"$work/unusable.err"
+_assert_eq "vscode extensions: unusable empty inventory performs one validation probe" \
+  "2" "$(wc -l <"$unusable_log" | tr -d ' ')"
+_assert_contains "vscode extensions: unusable empty inventory does not start installs" \
+  "--list-extensions --show-versions" "$(cat "$unusable_log")"
+_assert_contains "vscode extensions: unusable empty inventory probes the CLI version" \
+  "--version" "$(cat "$unusable_log")"
+_assert_contains "vscode extensions: unusable empty inventory warning is visible" \
+  "integrated terminal IPC is unavailable" "$(cat "$work/unusable.err")"
+
+warning_home="$work/warning-home"
+warning_bin="$work/warning-bin"
+warning_log="$work/warning.log"
+mkdir -p "$warning_home" "$warning_bin"
+cat >"$warning_bin/code" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DOT_TEST_WARNING_CODE_LOG"
+case " $* " in
+  *" --list-extensions "*)
+    printf 'benign inventory warning\n' >&2
+    exit 0
+    ;;
+  *" --version "*)
+    printf '1.99.3\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$warning_bin/code"
+env -u WSL_DISTRO_NAME -u WSL_INTEROP \
+  DOT_TEST_WARNING_CODE_LOG="$warning_log" \
+  PATH="$warning_bin:/usr/bin:/bin" \
+  "$(command -v python3)" "$helper" --home "$warning_home" --manifest "$unusable_manifest" \
+  >"$work/warning.out" 2>"$work/warning.err"
+_assert_eq "vscode extensions: valid empty inventory probes version before install" \
+  "3" "$(wc -l <"$warning_log" | tr -d ' ')"
+_assert_contains "vscode extensions: valid empty inventory remains installable" \
+  "--install-extension example.unusable" "$(cat "$warning_log")"
+
+wsl_home="$work/wsl-home"
+wsl_drive="$work/fake-c-drive"
+wsl_win_home="$wsl_drive/Users/Chris With Space"
+wsl_win_path='C:\Users\Chris With Space'
+wsl_bin="$work/wsl-bin"
+wsl_app="$wsl_win_home/AppData/Local/Programs/Microsoft VS Code"
+wsl_cmd="$wsl_drive/Windows/System32/cmd.exe"
+wsl_server="$wsl_home/.vscode-server/cli/servers/Stable-wsl/server"
+wsl_manifest="$work/wsl.toml"
+mkdir -p "$wsl_home" "$wsl_bin" "$wsl_app/resources/app/out" "$(dirname "$wsl_cmd")"
+touch "$wsl_app/resources/app/out/cli.js"
+_make_fake_code "$wsl_bin/code" 1
+_make_fake_code "$wsl_app/Code.exe"
+_make_fake_cmd "$wsl_cmd"
+_make_fake_code "$wsl_server/bin/code-server"
+_write_product "$wsl_server/product.json" "8.8.8"
+cat >"$wsl_bin/wslpath" <<PY
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+drive = Path("$wsl_drive")
+home = Path("$wsl_win_home")
+windows_home = r"$wsl_win_path"
+
+if sys.argv[1:] == [r"C:\Windows\System32\cmd.exe"]:
+    print(drive / "Windows" / "System32" / "cmd.exe")
+    sys.exit(0)
+if sys.argv[1:] == ["C:\\\\"]:
+    print(drive)
+    sys.exit(0)
+if sys.argv[1:] == [windows_home]:
+    print(home)
+    sys.exit(0)
+if len(sys.argv) == 3 and sys.argv[1] == "-w":
+    path = Path(sys.argv[2])
+    if path == drive / "Windows" / "System32" / "cmd.exe":
+        print(r"C:\Windows\System32\cmd.exe")
+        sys.exit(0)
+    if path == drive:
+        print("C:\\\\")
+        sys.exit(0)
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        pass
+    else:
+        suffix = str(rel).replace("/", "\\\\")
+        print(windows_home + (("\\\\" + suffix) if suffix != "." else ""))
+        sys.exit(0)
+sys.exit(1)
+PY
+chmod +x "$wsl_bin/wslpath"
+_assert_eq "vscode extensions: fake wslpath resolves System32 cmd" \
+  "$wsl_cmd" "$("$wsl_bin/wslpath" 'C:\Windows\System32\cmd.exe')"
+_assert_eq "vscode extensions: fake wslpath resolves C drive root" \
+  "$wsl_drive" "$("$wsl_bin/wslpath" "C:\\")"
+cat >"$wsl_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.wsl"]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
+TOML
+wsl_log="$work/wsl.log"
+wsl_cmd_log="$work/wsl-cmd.log"
+DOT_TEST_VSCODE_EXT_LOG="$wsl_log" \
+  DOT_TEST=0 \
+  DOT_TEST_FAKE_USERPROFILE="$wsl_win_path" \
+  DOT_TEST_FAKE_USERPROFILE_POSIX="$wsl_win_home" \
+  DOT_TEST_WINDOWS_CMD_LOG="$wsl_cmd_log" \
+  WSL_DISTRO_NAME=archlinux \
+  PATH="$wsl_bin:$PATH" \
+  python3 "$helper" --home "$wsl_home" --manifest "$wsl_manifest"
+_assert_exit "vscode extensions: WSL installs native Windows and remote profiles" 0 "$?"
+if [[ ! -f "$wsl_win_home/.vscode/extensions/installed.json" ]]; then
+  printf 'missing native fake extension state\n' >&2
+  printf 'fake cmd log:\n' >&2
+  [[ ! -f "$wsl_cmd_log" ]] || sed -n '1,120p' "$wsl_cmd_log" >&2
+  printf 'fake code log:\n' >&2
+  [[ ! -f "$wsl_log" ]] || sed -n '1,120p' "$wsl_log" >&2
+fi
+python3 - "$wsl_log" "$wsl_bin/code" "$wsl_app/Code.exe" \
+  "$wsl_server/bin/code-server" \
+  "$wsl_win_home/.vscode/extensions/installed.json" \
+  "$wsl_home/.vscode-server/extensions/installed.json" \
+  "$wsl_cmd_log" "$wsl_drive" "$wsl_win_home" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+log = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+local_code = sys.argv[2]
+windows_code = sys.argv[3]
+server = sys.argv[4]
+windows_state = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
+remote_state = json.loads(Path(sys.argv[6]).read_text(encoding="utf-8"))
+cmd_log = [
+    json.loads(line)
+    for line in Path(sys.argv[7]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+drive = sys.argv[8]
+windows_home = sys.argv[9]
+drive_real = str(Path(drive).resolve())
+windows_home_real = str(Path(windows_home).resolve())
+
+assert not any(entry["command"] == local_code for entry in log)
+assert any(
+    entry["command"] == windows_code
+    and "--install-extension" in entry["argv"]
+    and entry["electron_run_as_node"] == "1"
+    for entry in log
+)
+assert any(entry["command"] == server for entry in log)
+assert windows_state["example.wsl"] is None
+assert remote_state["example.wsl"] is None
+wrapper = Path(sys.argv[5]).parents[1] / "dot-code-cli.cmd"
+wrapper_text = wrapper.read_text(encoding="utf-8")
+assert "\\\\wsl.localhost" not in wrapper_text
+assert "/tmp/" not in wrapper_text
+assert "/mnt/" not in wrapper_text
+assert f'"{windows_code}"' not in wrapper_text
+assert '"C:\\Users\\Chris With Space\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"' in wrapper_text
+assert (
+    '"C:\\Users\\Chris With Space\\AppData\\Local\\Programs\\Microsoft VS Code\\resources\\app\\out\\cli.js"'
+    in wrapper_text
+)
+assert "ELECTRON_RUN_AS_NODE" in wrapper_text
+assert any(
+    entry["argv"] == ["/D", "/C", "set USERPROFILE"]
+    and str(Path(entry["cwd"]).resolve()) == drive_real
+    for entry in cmd_log
+)
+assert any(
+    entry["argv"][:2] == ["/D", "/C"]
+    and str(Path(entry["cwd"]).resolve()) == windows_home_real
+    for entry in cmd_log
+)
+PY
+_assert_exit "vscode extensions: WSL targets Windows desktop and server dirs" 0 "$?"
+
+path_bin="$work/path-bin"
+mkdir -p "$path_bin"
+cat >"$path_bin/wslpath" <<'PY'
+#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["-w", "/c/Users/Chris/AppData"]:
+    print(r"C:\Users\Chris\AppData")
+    sys.exit(0)
+sys.exit(1)
+PY
+chmod +x "$path_bin/wslpath"
+PATH="$path_bin:$PATH" python3 - "$module" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("extensions", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert module._windows_arg_path(Path("/c/Users/Chris/AppData")) == r"C:\Users\Chris\AppData"
+assert module._windows_arg_path(Path("/mnt/c/Users/Chris/AppData")) == (
+    r"C:\Users\Chris\AppData"
+)
+PY
+_assert_exit "vscode extensions: Windows CLI args use drive paths" 0 "$?"
+
+scan_home="$work/scan-home"
+mkdir -p "$scan_home/AppData/Local/Programs/Microsoft VS Code"
+DOT_TEST=0 DOT_TEST_WINDOWS_HOME='' DOT_TEST_WINDOWS_CMD_EXE="$work/missing-cmd.exe" \
+  python3 - "$module" <<'PY'
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("extensions", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert module._wsl_windows_home() is None
+PY
+_assert_exit "vscode extensions: Windows home is not inferred from user scan" 0 "$?"
+
+shared_override_home="$work/shared-override-home"
+DOT_TEST=0 DOT_TEST_WINDOWS_HOME='' DOT_WINDOWS_HOME="$shared_override_home" \
+  python3 - "$module" "$shared_override_home" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("extensions", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert module._wsl_windows_home() == Path(sys.argv[2])
+PY
+_assert_exit "vscode extensions: WSL accepts shared Windows home override" 0 "$?"
+
+broken_home="$work/broken-home"
+broken_bad="$broken_home/.vscode-server/cli/servers/Stable-bad/server"
+broken_good="$broken_home/.vscode-server/cli/servers/Stable-good/server"
+broken_manifest="$work/broken.toml"
+_make_broken_code "$broken_bad/bin/code-server"
+_make_fake_code "$broken_good/bin/code-server"
+_write_product "$broken_bad/product.json" "10.0.0"
+_write_product "$broken_good/product.json" "9.0.0"
+cat >"$broken_manifest" <<'TOML'
+[bundle.common]
+extensions = ["example.broken"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
+TOML
+broken_log="$work/broken.log"
+DOT_TEST_VSCODE_EXT_LOG="$broken_log" \
+  python3 "$helper" --home "$broken_home" --manifest "$broken_manifest" \
+  >"$work/broken.out" 2>"$work/broken.err"
+_assert_exit "vscode extensions: broken CLI remains advisory" 0 "$?"
+_assert_contains "vscode extensions: broken CLI warning is visible" \
+  "failed to run VS Code CLI" "$(cat "$work/broken.err")"
+python3 - "$broken_log" "$broken_good/bin/code-server" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+log = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+assert any(entry["command"] == sys.argv[2] for entry in log)
+PY
+_assert_exit "vscode extensions: broken CLI falls back to older candidate" 0 "$?"
+
+_test_summary
