@@ -85,8 +85,20 @@ if "--install-extension" in args:
 
 sys.exit(0)
 PY
-  perl -0pi -e "s/__FAIL_LIST__/$fail_list/g" "$path"
-  perl -0pi -e "s/__SLEEP_SECONDS__/$sleep_seconds/g" "$path"
+  # Python is already the runtime under test, while Perl is not part of the
+  # tool's contract and is absent on otherwise supported Alpine and Termux
+  # installations.  Use Python to specialize the fake instead of quietly
+  # turning a test-only convenience into a production dependency.
+  python3 - "$path" "$fail_list" "$sleep_seconds" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace("__FAIL_LIST__", sys.argv[2])
+text = text.replace("__SLEEP_SECONDS__", sys.argv[3])
+path.write_text(text, encoding="utf-8")
+PY
   chmod +x "$path"
 }
 
@@ -185,6 +197,11 @@ JSON
 }
 
 work=$(_tmpdir)
+# macOS exposes the same temporary directory as both /var and /private/var,
+# and TMPDIR commonly ends in a slash.  The checks below compare filesystem
+# identity, not user-visible path spelling, so normalize their shared fixture
+# root once instead of weakening each executable and state-file assertion.
+work=$(cd "$work" && pwd -P)
 home="$work/home"
 bin="$work/bin"
 mkdir -p "$home" "$bin"
