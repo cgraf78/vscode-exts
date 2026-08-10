@@ -260,6 +260,58 @@ assert lock_one is not None and lock_one.parent == home / ".cache/vscode-exts/lo
 PY
 _assert_exit "vscode-exts: lock path follows absolute XDG policy" 0 "$?"
 
+# Parse the public example with the production loader. Keeping these expected
+# profiles explicit catches both TOML drift and accidental weakening of the
+# local-versus-remote target contract.
+python3 - "$module" "$ROOT/examples/extensions.toml" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+module_path = Path(sys.argv[1])
+manifest_path = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("vscode_exts_example_test", module_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+profiles = module.load_manifests([manifest_path])
+actual = {
+    profile.name: {
+        "editor": profile.editor,
+        "channel": profile.channel,
+        "scope": profile.scope,
+        "extensions": [extension.extension_id for extension in profile.extensions],
+    }
+    for profile in profiles
+}
+assert actual == {
+    "vscode-local": {
+        "editor": "vscode",
+        "channel": "stable",
+        "scope": "local",
+        "extensions": [
+            "ms-python.python",
+            "redhat.vscode-yaml",
+            "rust-lang.rust-analyzer",
+            "ms-vscode-remote.remote-ssh",
+        ],
+    },
+    "vscode-remote": {
+        "editor": "vscode",
+        "channel": "stable",
+        "scope": "remote",
+        "extensions": [
+            "ms-python.python",
+            "redhat.vscode-yaml",
+            "rust-lang.rust-analyzer",
+        ],
+    },
+}
+PY
+_assert_exit "vscode-exts: checked-in example uses the production manifest model" 0 "$?"
+
 xdg_home="$work/xdg-home"
 xdg_config_home="$work/xdg-config"
 xdg_bin="$work/xdg-bin"
