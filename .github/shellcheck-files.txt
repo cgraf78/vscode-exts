@@ -1,5 +1,7 @@
 # type<TAB>repository-relative path
 program	install.sh
+program	scripts/checkout-installer.conf
+program	support/install-checkout.sh
 program	test/install-test
 program	test/lib/test.sh
 program	test/run

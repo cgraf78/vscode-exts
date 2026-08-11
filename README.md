@@ -17,7 +17,16 @@ vscode-exts --manifest base.toml --manifest laptop.toml
 
 ## Installation
 
-Clone the repository and install a PATH-visible symlink:
+For the simplest checkout-backed install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cgraf78/vscode-exts/main/install.sh | bash
+```
+
+This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
+absolute, or under `$HOME/.local/share` otherwise, so the launcher, private
+Python library, and schema remain version-coupled. To manage the checkout path
+yourself:
 
 ```bash
 git clone https://github.com/cgraf78/vscode-exts.git
