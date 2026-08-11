@@ -21,11 +21,28 @@ if [[ -L "$installed" ]]; then
 else
   _fail "installation: publishes a symlink"
 fi
+_assert_eq "installation: symlink selects this checkout" \
+  "$ROOT/bin/vscode-exts" "$(readlink "$installed")"
 if [[ -x "$installed" ]] && "$installed" --help >/dev/null 2>&1; then
   _pass "installation: symlink resolves the provider library"
 else
   _fail "installation: symlink resolves the provider library"
 fi
+
+unset reinstall_rc
+PREFIX="$prefix" "$ROOT/install.sh" \
+  >"$prefix/reinstall.out" 2>"$prefix/reinstall.err" || reinstall_rc=$?
+_assert_exit "installation: reinstall is idempotent" 0 "${reinstall_rc:-0}"
+_assert_eq "installation: reinstall preserves the checkout target" \
+  "$ROOT/bin/vscode-exts" "$(readlink "$installed")"
+
+custom_bin=$(_tmpdir)/commands
+unset custom_rc
+BIN_DIR="$custom_bin" "$ROOT/install.sh" \
+  >"$prefix/custom.out" 2>"$prefix/custom.err" || custom_rc=$?
+_assert_exit "installation: custom BIN_DIR succeeds" 0 "${custom_rc:-0}"
+_assert_eq "installation: custom BIN_DIR receives the checkout link" \
+  "$ROOT/bin/vscode-exts" "$(readlink "$custom_bin/vscode-exts")"
 
 blocked_prefix=$(_tmpdir)
 mkdir -p "$blocked_prefix/bin"
@@ -38,5 +55,21 @@ _assert_eq "installation: preserves a non-symlink destination" \
   "user owned" "$(cat "$blocked_prefix/bin/vscode-exts")"
 _assert_contains "installation: refusal names the destination" \
   "$blocked_prefix/bin/vscode-exts" "$(cat "$blocked_prefix/install.err")"
+
+missing_root=$(_tmpdir)
+missing_prefix=$(_tmpdir)
+cp "$ROOT/install.sh" "$missing_root/install.sh"
+unset missing_rc
+PREFIX="$missing_prefix" "$missing_root/install.sh" \
+  >"$missing_prefix/install.out" 2>"$missing_prefix/install.err" || missing_rc=$?
+_assert_exit "installation: missing command source fails" 1 "${missing_rc:-0}"
+if [[ ! -e "$missing_prefix/bin/vscode-exts" &&
+  ! -L "$missing_prefix/bin/vscode-exts" ]]; then
+  _pass "installation: missing source publishes no command"
+else
+  _fail "installation: missing source publishes no command"
+fi
+_assert_contains "installation: missing source is actionable" \
+  "command source is not executable" "$(cat "$missing_prefix/install.err")"
 
 _test_summary
