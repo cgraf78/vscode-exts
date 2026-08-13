@@ -20,7 +20,7 @@ jobs:
     # The full shared matrix supplies current Python on Linux, macOS, and
     # Termux. WSL's Windows process boundary is covered by deterministic command
     # fixtures because GitHub does not provide a native WSL hosted runner.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@3834fe036de0360a8418b6e129034797071edb0c
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@2a6119d7886443929e1961a0e11b8dafa71c1978
     with:
       matrix-set: full
       profiles: base,python
@@ -40,4 +40,4 @@ jobs:
       # GitHub resolves literal `uses:` refs before a job can read repository
       # files, so the lock cannot be interpolated. This gate verifies every
       # unavoidable reusable-workflow ref matches the reviewed dependency pin.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@3834fe036de0360a8418b6e129034797071edb0c
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@2a6119d7886443929e1961a0e11b8dafa71c1978
