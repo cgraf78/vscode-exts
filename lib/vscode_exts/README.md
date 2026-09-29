@@ -12,5 +12,5 @@ for a single-command tool.
 
 `VSCODE_EXTS_TEST_*` variables are internal fixture seams used to simulate WSL
 process boundaries. The supported runtime controls are documented in the root
-README and intentionally limited to `VSCODE_EXTS_WINDOWS_HOME` and
-`VSCODE_EXTS_TIMEOUT_SECONDS`.
+README and intentionally limited to the `--manifest PATH` and `--home PATH`
+flags plus `VSCODE_EXTS_WINDOWS_HOME` and `VSCODE_EXTS_TIMEOUT_SECONDS`.
