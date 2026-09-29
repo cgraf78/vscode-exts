@@ -13,6 +13,7 @@ extensions installed outside the manifest remain untouched.
 ```console
 vscode-exts
 vscode-exts --manifest base.toml --manifest laptop.toml
+vscode-exts --home /path/to/home
 ```
 
 ## Installation
@@ -116,6 +117,13 @@ wrapper, while remote profiles continue to target the WSL-side server. Set
 `VSCODE_EXTS_WINDOWS_HOME` to the WSL-visible Windows profile directory when
 Windows environment discovery is unavailable.
 
+Local extension directories and remote server layouts are found below
+`$HOME`. `--home PATH` selects a different home whose `.vscode/extensions`,
+`.vscode-insiders/extensions`, `.vscode-server`, and `.vscode-server-insiders`
+trees are used instead. Manifest discovery, the lock root, local `code` and
+`code-insiders` command lookup, and the WSL-side Windows profile still follow
+the environment.
+
 ## Reconciliation and failures
 
 For each resolved target, `vscode-exts`:
@@ -150,6 +158,9 @@ Run the complete behavior, installation, compilation, and ShellCheck suite:
 ```bash
 test/run
 ```
+
+ShellCheck is skipped when `shellcheck` is not on `PATH` or when
+`VSCODE_EXTS_SKIP_SHELLCHECK=1` is set.
 
 The suite uses temporary fake editor installations and never changes the
 machine's real extensions. See [`test/README.md`](test/README.md) and
