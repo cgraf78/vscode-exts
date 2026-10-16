@@ -4,30 +4,59 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 
-`vscode-exts` reconciles declarative extension manifests across local VS Code,
-VS Code Insiders, remote VS Code Server installations, and native Windows VS
-Code reached from WSL. Reconciliation is intentionally additive: declared
-extensions are installed when missing, pinned versions are corrected, and
-extensions installed outside the manifest remain untouched.
+Keep VS Code extensions consistent on every machine and every VS Code Server
+you use. List them once in TOML and run `vscode-exts`: it installs whatever is
+missing, corrects pinned versions, and leaves every other extension alone.
 
-```console
-vscode-exts
-vscode-exts --manifest base.toml --manifest laptop.toml
-vscode-exts --home /path/to/home
-```
+Unlike Settings Sync, it needs no account and lives as a plain file in your
+dotfiles. Unlike Remote-SSH's `remote.SSH.defaultExtensions`, it runs on the
+remote host itself, against the VS Code Server already installed there, so a
+bootstrap script or configuration manager can keep that server current. It
+covers local VS Code and VS Code Insiders, VS Code Server installs, and native
+Windows VS Code reached from WSL, with exact version pins and per-machine
+fragments.
 
-## Installation
+## Quick start
 
-For the simplest checkout-backed install:
+Install it into `~/.local/bin`, which must be on `PATH`. Python 3.11 or newer
+is required.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cgraf78/vscode-exts/main/install.sh | bash
 ```
 
-This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
-absolute, or under `$HOME/.local/share` otherwise, so the launcher, private
-Python library, and schema remain version-coupled. To manage the checkout path
-yourself:
+Write `~/.config/vscode-exts/extensions.toml`:
+
+```toml
+[bundle.common]
+extensions = ["ms-python.python", "rust-lang.rust-analyzer"]
+
+[profile.vscode-local]
+editor = "vscode"
+channel = "stable"
+scope = "local"
+include = ["common"]
+```
+
+Then run:
+
+```bash
+vscode-exts
+```
+
+It is silent when everything succeeds and prints only warnings. A profile
+whose editor is not installed on the current machine is skipped without a
+message, so on a machine without the `code` CLI the run prints nothing and
+exits 0.
+
+## Installation
+
+The quick start's `curl` command keeps a durable managed checkout under
+`$XDG_DATA_HOME` when that path is absolute, or under `$HOME/.local/share`
+otherwise, so the launcher, private Python library, and schema remain
+version-coupled. Rerun the command to update. The command needs Python 3.11
+or newer as `python3`; older versions fail at startup with a `tomllib` import
+error. To manage the checkout path yourself:
 
 ```bash
 git clone https://github.com/cgraf78/vscode-exts.git
@@ -38,7 +67,8 @@ cd vscode-exts
 `PREFIX` defaults to `$HOME/.local`; `BIN_DIR` can override its `bin` child.
 The symlink resolves back to the matching checkout, keeping the CLI, Python
 library, and schema version-coupled. Dependency managers can expose
-`bin/vscode-exts` directly; for example, a shdeps entry is:
+`bin/vscode-exts` directly; for example, a
+[shdeps](https://github.com/cgraf78/shdeps) manifest entry is:
 
 ```text
 cgraf78/vscode-exts  github
@@ -58,7 +88,11 @@ When `XDG_CONFIG_HOME` is unset or relative, the root is
 files directly under `extensions.d` follow in lexical order. At least one file
 must exist. Supplying one or more `--manifest` arguments uses exactly those
 files in argument order and bypasses default discovery, which lets a
-configuration manager retain its own fragment-selection policy.
+configuration manager retain its own fragment-selection policy:
+
+```bash
+vscode-exts --manifest base.toml --manifest laptop.toml
+```
 
 Each manifest contains reusable extension bundles and concrete install
 profiles:
