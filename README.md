@@ -36,9 +36,15 @@ editor = "vscode"
 channel = "stable"
 scope = "local"
 include = ["common"]
+
+[profile.vscode-remote]
+editor = "vscode"
+channel = "stable"
+scope = "remote"
+include = ["common"]
 ```
 
-Then run:
+Then run it on your desktop and on each host you reach with VS Code Remote:
 
 ```bash
 vscode-exts
@@ -46,8 +52,9 @@ vscode-exts
 
 It is silent when everything succeeds and prints only warnings. A profile
 whose editor is not installed on the current machine is skipped without a
-message, so on a machine without the `code` CLI the run prints nothing and
-exits 0.
+message: the local profile needs the `code` CLI, and the remote profile
+needs a VS Code Server that a remote session has already installed. With
+neither, the run prints nothing and exits 0.
 
 ## Installation
 
