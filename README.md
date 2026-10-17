@@ -1,8 +1,9 @@
 # vscode-exts
 
-![Tests](https://github.com/cgraf78/vscode-exts/actions/workflows/test.yml/badge.svg?branch=main)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
+[![Tests](https://github.com/cgraf78/vscode-exts/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/cgraf78/vscode-exts/actions/workflows/test.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/license-MIT-67ac09)](LICENSE)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux-lightgrey)](#requirements)
 
 Keep VS Code extensions consistent on every machine and every VS Code Server
 you use. List them once in TOML and run `vscode-exts`: it installs whatever is
